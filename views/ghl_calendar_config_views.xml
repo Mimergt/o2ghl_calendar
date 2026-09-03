@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_ghl_calendar_config_form" model="ir.ui.view">
+        <field name="name">ghl.calendar.config.form</field>
+        <field name="model">ghl.calendar.config</field>
+        <field name="arch" type="xml">
+            <form string="Configuración GHL Calendar Sync">
+                <header>
+                    <button name="action_test_connection" type="object"
+                            string="Probar conexión" class="btn-secondary"/>
+                    <button name="action_sync_now" type="object"
+                            string="Sincronizar ahora" class="btn-primary"/>
+                    <field name="last_sync_status" widget="badge"
+                           decoration-success="last_sync_status == 'ok'"
+                           decoration-danger="last_sync_status == 'error'"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <group>
+                        <group string="Credenciales GHL">
+                            <field name="ghl_api_key" password="True"/>
+                            <field name="ghl_location_id"/>
+                        </group>
+                        <group string="Mapeo de calendario">
+                            <field name="ghl_calendar_id"/>
+                            <field name="odoo_user_id"/>
+                            <field name="sync_mode"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Ventana de sincronización">
+                            <field name="sync_window_days_past"/>
+                            <field name="sync_window_days_future"/>
+                        </group>
+                        <group string="Estado">
+                            <field name="active"/>
+                            <field name="last_sync_datetime" readonly="1"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Log última corrida">
+                            <field name="last_sync_log" readonly="1" widget="text"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_ghl_calendar_config_list" model="ir.ui.view">
+        <field name="name">ghl.calendar.config.list</field>
+        <field name="model">ghl.calendar.config</field>
+        <field name="arch" type="xml">
+            <list string="Configuraciones GHL Calendar Sync">
+                <field name="name"/>
+                <field name="ghl_calendar_id"/>
+                <field name="odoo_user_id"/>
+                <field name="sync_mode"/>
+                <field name="last_sync_datetime"/>
+                <field name="last_sync_status" widget="badge"
+                       decoration-success="last_sync_status == 'ok'"
+                       decoration-danger="last_sync_status == 'error'"/>
+                <field name="active"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_ghl_calendar_config" model="ir.actions.act_window">
+        <field name="name">GHL Calendar Sync - Configuración</field>
+        <field name="res_model">ghl.calendar.config</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <menuitem id="menu_ghl_calendar_sync_root"
+              name="GHL Calendar Sync"
+              sequence="90"
+              groups="base.group_system"/>
+    <menuitem id="menu_ghl_calendar_config"
+              name="Configuración"
+              parent="menu_ghl_calendar_sync_root"
+              action="action_ghl_calendar_config"
+              sequence="10"/>
+</odoo>

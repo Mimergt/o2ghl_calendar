@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_calendar_event_form_ghl_inherit" model="ir.ui.view">
+        <field name="name">calendar.event.form.ghl.inherit</field>
+        <field name="model">calendar.event</field>
+        <field name="inherit_id" ref="calendar.view_calendar_event_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+                <group string="GoHighLevel" col="2"
+                       invisible="not ghl_event_id">
+                    <field name="ghl_event_id" readonly="1"/>
+                    <field name="ghl_calendar_id" readonly="1"/>
+                    <field name="ghl_last_sync" readonly="1"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>
