@@ -77,6 +77,10 @@ sentido, según configuración).
 
 ## Changelog
 
+- **1.2.0.0**: Cron cada 5 minutos (antes 10). Nuevo campo
+  `ghl_appointment_status` (Confirmada/Cancelada/Asistió/No asistió/
+  Inválida) sincronizado en ambos sentidos; marcar "Cancelada" en Odoo
+  borra la cita en GHL.
 - **1.1.0.0**: Se agrega selección de modo de sincronización
   (bidireccional / solo Odoo→GHL / solo GHL→Odoo) por configuración.
 - **1.0.0.0**: Versión inicial. Sync bidireccional con GHL ganando en

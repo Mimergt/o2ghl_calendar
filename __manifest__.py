@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     "name": "GoHighLevel Calendar Sync",
-    "version": "18.0.1.1.0",
+    "version": "18.0.1.2.0",
     "summary": "Sincronización bidireccional entre el Calendario de Odoo y GoHighLevel (GHL)",
     "description": """
 GoHighLevel Calendar Sync

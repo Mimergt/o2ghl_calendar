@@ -11,6 +11,7 @@
                     <field name="ghl_event_id" readonly="1"/>
                     <field name="ghl_calendar_id" readonly="1"/>
                     <field name="ghl_last_sync" readonly="1"/>
+                    <field name="ghl_appointment_status"/>
                 </group>
             </xpath>
         </field>

@@ -34,6 +34,21 @@ class CalendarEvent(models.Model):
         string="Pendiente de borrar en GHL", copy=False, default=False,
         help="Bandera interna: la cita fue borrada en Odoo y falta propagar el borrado a GHL.",
     )
+    ghl_appointment_status = fields.Selection(
+        [
+            ("confirmed", "Confirmada"),
+            ("cancelled", "Cancelada"),
+            ("showed", "Asistió"),
+            ("noshow", "No asistió"),
+            ("invalid", "Inválida"),
+        ],
+        string="Estado de cita GHL",
+        copy=False,
+        default="confirmed",
+        help="Estado de la cita en GoHighLevel. Se sincroniza en ambos "
+        "sentidos según el modo de sincronización configurado. Marcar "
+        "como 'Cancelada' borra la cita en ambos sistemas.",
+    )
 
     # ------------------------------------------------------------------
     # Interceptar borrado en Odoo -> marcar para borrar en GHL
@@ -216,6 +231,9 @@ class CalendarEvent(models.Model):
         )
         start_dt = self._ghl_parse_datetime(ghl_event.get("startTime"))
         end_dt = self._ghl_parse_datetime(ghl_event.get("endTime"))
+        ghl_status = (ghl_event.get("appointmentStatus") or "confirmed").lower()
+        if ghl_status not in ("confirmed", "cancelled", "showed", "noshow", "invalid"):
+            ghl_status = "confirmed"
 
         vals = {
             "name": ghl_event.get("title") or "Cita GHL",
@@ -225,6 +243,7 @@ class CalendarEvent(models.Model):
             "ghl_event_id": ghl_event.get("id") or ghl_event.get("_id"),
             "ghl_calendar_id": config.ghl_calendar_id,
             "ghl_last_sync": fields.Datetime.now(),
+            "ghl_appointment_status": ghl_status,
         }
         if partner:
             vals["partner_ids"] = [(6, 0, [partner.id])]
@@ -307,6 +326,7 @@ class CalendarEvent(models.Model):
             start_iso=fields.Datetime.to_string(event.start).replace(" ", "T") + "+00:00",
             end_iso=fields.Datetime.to_string(event.stop).replace(" ", "T") + "+00:00",
             notes=event.description or None,
+            appointment_status=event.ghl_appointment_status or "confirmed",
         )
         ghl_id = ghl_event.get("id") or ghl_event.get("_id")
         event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).write(
@@ -319,12 +339,28 @@ class CalendarEvent(models.Model):
         log_lines.append(f"Creada en GHL desde Odoo: odoo id {event.id} -> {ghl_id}")
 
     def _ghl_update_event_in_ghl(self, config, client, event, log_lines):
+        if event.ghl_appointment_status == "cancelled":
+            # Cancelar en Odoo = borrar la cita en GHL (y en Odoo, vía unlink normal).
+            try:
+                client.delete_event(event.ghl_event_id)
+                log_lines.append(
+                    f"Cita cancelada en Odoo -> borrada en GHL: {event.ghl_event_id}"
+                )
+            except GHLApiError:
+                _logger.exception(
+                    "No se pudo borrar en GHL la cita cancelada %s", event.ghl_event_id
+                )
+                raise
+            event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).unlink()
+            return
+
         client.update_event(
             event.ghl_event_id,
             title=event.name or "Cita",
             startTime=fields.Datetime.to_string(event.start).replace(" ", "T") + "+00:00",
             endTime=fields.Datetime.to_string(event.stop).replace(" ", "T") + "+00:00",
             notes=event.description or None,
+            appointmentStatus=event.ghl_appointment_status or "confirmed",
         )
         event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).write(
             {"ghl_last_sync": fields.Datetime.now()}
