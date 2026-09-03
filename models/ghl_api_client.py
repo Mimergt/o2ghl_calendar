@@ -147,6 +147,16 @@ class GHLApiClient:
         contacts = data.get("contacts", [])
         return contacts[0] if contacts else None
 
+    def get_contact(self, contact_id):
+        """Obtiene un contacto por su ID. Devuelve None si no existe/hay error."""
+        if not contact_id:
+            return None
+        try:
+            data = self._request("GET", f"/contacts/{contact_id}")
+        except GHLApiError:
+            return None
+        return data.get("contact", data)
+
     def create_contact(self, name, email=None, phone=None):
         body = {
             "locationId": self.location_id,

@@ -184,7 +184,7 @@ class CalendarEvent(models.Model):
                     log_lines.append(f"Borrada en Odoo (cancelada en GHL): {ghl_id}")
                 continue
 
-            vals = self._ghl_map_ghl_event_to_odoo_vals(config, ghl_event)
+            vals = self._ghl_map_ghl_event_to_odoo_vals(config, client, ghl_event)
 
             if not odoo_event:
                 new_event = self.sudo().with_context(**{GHL_SYNC_CONTEXT_KEY: True}).create(vals)
@@ -224,10 +224,14 @@ class CalendarEvent(models.Model):
 
         return touched_odoo_ids
 
+    # Prefijo para identificar en Odoo que una cita viene originalmente de GHL.
+    GHL_TITLE_PREFIX = "CRM-"
+
     @api.model
-    def _ghl_map_ghl_event_to_odoo_vals(self, config, ghl_event):
+    def _ghl_map_ghl_event_to_odoo_vals(self, config, client, ghl_event):
+        contact_id = ghl_event.get("contactId")
         partner = self._ghl_find_or_create_partner_from_contact_id(
-            config, ghl_event.get("contactId")
+            config, client, contact_id
         )
         start_dt = self._ghl_parse_datetime(ghl_event.get("startTime"))
         end_dt = self._ghl_parse_datetime(ghl_event.get("endTime"))
@@ -235,8 +239,12 @@ class CalendarEvent(models.Model):
         if ghl_status not in ("confirmed", "cancelled", "showed", "noshow", "invalid"):
             ghl_status = "confirmed"
 
+        title = ghl_event.get("title") or "Cita GHL"
+        if not title.startswith(self.GHL_TITLE_PREFIX):
+            title = f"{self.GHL_TITLE_PREFIX}{title}"
+
         vals = {
-            "name": ghl_event.get("title") or "Cita GHL",
+            "name": title,
             "start": start_dt,
             "stop": end_dt,
             "user_id": config.odoo_user_id.id,
@@ -247,9 +255,21 @@ class CalendarEvent(models.Model):
         }
         if partner:
             vals["partner_ids"] = [(6, 0, [partner.id])]
-        description = ghl_event.get("notes")
-        if description:
-            vals["description"] = description
+
+        description_parts = []
+        original_notes = ghl_event.get("notes")
+        if original_notes:
+            description_parts.append(original_notes)
+        if partner:
+            contact_lines = [f"Contacto GHL: {partner.name}"]
+            if partner.email:
+                contact_lines.append(f"Correo: {partner.email}")
+            if partner.phone:
+                contact_lines.append(f"Teléfono: {partner.phone}")
+            description_parts.append("\n".join(contact_lines))
+        if description_parts:
+            vals["description"] = "\n\n".join(description_parts)
+
         return vals
 
     @staticmethod
@@ -272,16 +292,38 @@ class CalendarEvent(models.Model):
         return dt
 
     @api.model
-    def _ghl_find_or_create_partner_from_contact_id(self, config, ghl_contact_id):
+    def _ghl_find_or_create_partner_from_contact_id(self, config, client, ghl_contact_id):
+        """
+        Busca un res.partner vinculado a este ghl_contact_id. Si no existe,
+        intenta traer los datos del contacto desde GHL y crea un partner
+        ligero (nombre + email + teléfono) para poder mostrarlo como
+        asistente de la cita en Odoo.
+        """
         if not ghl_contact_id:
             return False
         Partner = self.env["res.partner"].sudo()
         partner = Partner.search([("ghl_contact_id", "=", ghl_contact_id)], limit=1)
         if partner:
             return partner
-        # No lo tenemos mapeado todavía: lo dejamos sin vincular por ahora.
-        # (Podría extenderse para hacer GET /contacts/{id} y crear el partner aquí.)
-        return False
+
+        contact_data = client.get_contact(ghl_contact_id)
+        if not contact_data:
+            return False
+
+        name = (
+            contact_data.get("name")
+            or f"{contact_data.get('firstName', '')} {contact_data.get('lastName', '')}".strip()
+            or contact_data.get("email")
+            or "Contacto GHL"
+        )
+        vals = {
+            "name": name,
+            "email": contact_data.get("email") or False,
+            "phone": contact_data.get("phone") or False,
+            "ghl_contact_id": ghl_contact_id,
+        }
+        partner = Partner.create(vals)
+        return partner
 
     # ------------------------------------------------------------------
     # Paso 2: Odoo -> GHL
