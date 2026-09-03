@@ -253,8 +253,14 @@ class CalendarEvent(models.Model):
             "ghl_last_sync": fields.Datetime.now(),
             "ghl_appointment_status": ghl_status,
         }
+
+        attendee_partner_ids = set()
+        if config.odoo_user_id.partner_id:
+            attendee_partner_ids.add(config.odoo_user_id.partner_id.id)
         if partner:
-            vals["partner_ids"] = [(6, 0, [partner.id])]
+            attendee_partner_ids.add(partner.id)
+        if attendee_partner_ids:
+            vals["partner_ids"] = [(6, 0, list(attendee_partner_ids))]
 
         description_parts = []
         original_notes = ghl_event.get("notes")
