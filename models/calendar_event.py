@@ -50,6 +50,22 @@ class CalendarEvent(models.Model):
         "como 'Cancelada' borra la cita en ambos sistemas.",
     )
 
+    # --- Campos del reparto por sede (Fase 2, ver models/ghl_sede.py) ---
+    ghl_sede_id = fields.Many2one(
+        "ghl.sede", string="Sede GHL", copy=False, index=True,
+        help="Sede (reparto de citas entre vendedores) a la que pertenece "
+        "esta cita, si fue creada/ruteada por ese mecanismo en vez de por "
+        "una ghl.calendar.config de usuario fijo.",
+    )
+    ghl_sede_shift = fields.Selection(
+        [("morning", "Mañana"), ("afternoon", "Tarde")],
+        string="Turno calculado (sede)", copy=False,
+        help="Turno (mañana/tarde) calculado a partir de la hora de la "
+        "cita y la hora de corte de la sede, la última vez que se asignó "
+        "vendedor. Si en una sincronización posterior la hora de la cita "
+        "cae en un turno distinto, se vuelve a correr el reparto.",
+    )
+
     # ------------------------------------------------------------------
     # Interceptar borrado en Odoo -> marcar para borrar en GHL
     # ------------------------------------------------------------------
@@ -440,3 +456,189 @@ class CalendarEvent(models.Model):
         if contact_id:
             candidate.sudo().write({"ghl_contact_id": contact_id})
         return contact_id
+
+
+    # ------------------------------------------------------------------
+    # Reparto por sede (Fase 2) — independiente del pull/push basado en
+    # ghl.calendar.config: usa las credenciales y el calendario propios de
+    # cada ghl.sede, y su propio ciclo de sync (ver ghl.sede._cron_sync_all).
+    # Por ahora es solo GHL -> Odoo (pull): las citas siempre se originan
+    # en GHL vía el agente de IA que decide la sede; no hay push Odoo->GHL
+    # para citas de sede todavía.
+    # ------------------------------------------------------------------
+    GHL_SEDE_TZ = "America/Guatemala"
+
+    @api.model
+    def _ghl_sede_run_sync_for_sede(self, sede):
+        client = sede._get_client()
+        now = fields.Datetime.now()
+        window_start = now - timedelta(days=sede.sync_window_days_past)
+        window_end = now + timedelta(days=sede.sync_window_days_future)
+        log_lines = [f"Sede: {sede.name}"]
+        try:
+            self._ghl_sede_pull_from_ghl(sede, client, window_start, window_end, log_lines)
+            sede.sudo().write(
+                {
+                    "last_sync_datetime": now,
+                    "last_sync_status": "ok",
+                    "last_sync_log": "\n".join(log_lines) or "Sin cambios.",
+                }
+            )
+        except GHLApiError as exc:
+            log_lines.append(f"ERROR: {exc}")
+            sede.sudo().write(
+                {
+                    "last_sync_status": "error",
+                    "last_sync_log": "\n".join(log_lines),
+                }
+            )
+            raise
+
+    @api.model
+    def _ghl_sede_pull_from_ghl(self, sede, client, window_start, window_end, log_lines):
+        start_ms = int(window_start.timestamp() * 1000)
+        end_ms = int(window_end.timestamp() * 1000)
+
+        try:
+            ghl_events = client.list_events(sede.ghl_calendar_id, start_ms, end_ms)
+        except GHLApiError as exc:
+            log_lines.append(f"No se pudo listar eventos de GHL: {exc}")
+            raise
+
+        tz = pytz.timezone(self.GHL_SEDE_TZ)
+        ghl_event_ids_seen = set()
+
+        for ghl_event in ghl_events:
+            ghl_id = ghl_event.get("id") or ghl_event.get("_id")
+            if not ghl_id:
+                continue
+            ghl_event_ids_seen.add(ghl_id)
+
+            status = (ghl_event.get("appointmentStatus") or "").lower()
+            odoo_event = self.sudo().search([("ghl_event_id", "=", ghl_id)], limit=1)
+
+            if status in ("cancelled", "canceled", "invalid"):
+                if odoo_event:
+                    odoo_event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).unlink()
+                    log_lines.append(f"Borrada en Odoo (cancelada en GHL): {ghl_id}")
+                continue
+
+            start_dt_utc = self._ghl_parse_datetime(ghl_event.get("startTime"))
+            start_dt_local = pytz.UTC.localize(start_dt_utc).astimezone(tz)
+            hour_decimal = start_dt_local.hour + start_dt_local.minute / 60.0
+            current_shift = (
+                "morning" if hour_decimal < sede.morning_cutoff_time else "afternoon"
+            )
+
+            if not odoo_event:
+                vendor, _shift = sede._assign_vendor_and_shift(start_dt_local)
+                vals = self._ghl_sede_map_ghl_event_to_odoo_vals(
+                    sede, client, ghl_event, vendor, current_shift
+                )
+                new_event = self.sudo().with_context(**{GHL_SYNC_CONTEXT_KEY: True}).create(vals)
+                vendor_name = vendor.name if vendor else "(sin fallback_user_id configurado)"
+                log_lines.append(
+                    f"Creada en Odoo desde GHL (sede {sede.name}, turno {current_shift}, "
+                    f"vendedor {vendor_name}): {ghl_id} -> odoo id {new_event.id}"
+                )
+                continue
+
+            vals = self._ghl_sede_map_ghl_event_to_odoo_vals(
+                sede, client, ghl_event, vendor=None, shift=None, existing_event=odoo_event
+            )
+
+            if odoo_event.ghl_sede_shift and odoo_event.ghl_sede_shift != current_shift:
+                vendor, _shift = sede._assign_vendor_and_shift(start_dt_local)
+                vendor_name = vendor.name if vendor else "(sin fallback_user_id configurado)"
+                partner_ids = set(odoo_event.partner_ids.ids)
+                if odoo_event.user_id and odoo_event.user_id.partner_id:
+                    partner_ids.discard(odoo_event.user_id.partner_id.id)
+                if vendor and vendor.partner_id:
+                    partner_ids.add(vendor.partner_id.id)
+                vals["ghl_sede_shift"] = current_shift
+                vals["user_id"] = vendor.id if vendor else False
+                vals["partner_ids"] = [(6, 0, list(partner_ids))]
+                log_lines.append(
+                    f"Turno cambió ({odoo_event.ghl_sede_shift} -> {current_shift}) en {ghl_id}; "
+                    f"reasignado a {vendor_name}"
+                )
+
+            odoo_event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).write(vals)
+
+        orphan_domain = [
+            ("ghl_sede_id", "=", sede.id),
+            ("ghl_event_id", "!=", False),
+            ("ghl_event_id", "not in", list(ghl_event_ids_seen)),
+            ("start", ">=", window_start),
+            ("start", "<=", window_end),
+        ]
+        orphans = self.sudo().search(orphan_domain)
+        if orphans:
+            log_lines.append(
+                f"Borrando en Odoo {len(orphans)} evento(s) ya no presentes en GHL: "
+                f"{orphans.mapped('ghl_event_id')}"
+            )
+            orphans.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).unlink()
+
+    @api.model
+    def _ghl_sede_map_ghl_event_to_odoo_vals(
+        self, sede, client, ghl_event, vendor, shift, existing_event=None
+    ):
+        """
+        Arma los vals de calendar.event para una cita ruteada por sede.
+
+        Si existing_event es None (cita nueva), incluye vendedor/turno/
+        asistentes. Si existing_event está presente (cita ya sincronizada),
+        arma solo los campos "comunes" (fecha, estado, notas, contacto)
+        SIN tocar vendedor/turno — eso lo decide el llamador según si el
+        turno calculado cambió respecto al que ya tenía guardado.
+        """
+        contact_id = ghl_event.get("contactId")
+        partner = self._ghl_find_or_create_partner_from_contact_id(sede, client, contact_id)
+        start_dt = self._ghl_parse_datetime(ghl_event.get("startTime"))
+        end_dt = self._ghl_parse_datetime(ghl_event.get("endTime"))
+        ghl_status = (ghl_event.get("appointmentStatus") or "confirmed").lower()
+        if ghl_status not in ("confirmed", "cancelled", "showed", "noshow", "invalid"):
+            ghl_status = "confirmed"
+
+        title = ghl_event.get("title") or "Cita GHL"
+        if not title.startswith(self.GHL_TITLE_PREFIX):
+            title = f"{self.GHL_TITLE_PREFIX}{title}"
+
+        vals = {
+            "name": title,
+            "start": start_dt,
+            "stop": end_dt,
+            "ghl_event_id": ghl_event.get("id") or ghl_event.get("_id"),
+            "ghl_calendar_id": sede.ghl_calendar_id,
+            "ghl_sede_id": sede.id,
+            "ghl_last_sync": fields.Datetime.now(),
+            "ghl_appointment_status": ghl_status,
+        }
+
+        description_parts = []
+        original_notes = ghl_event.get("notes")
+        if original_notes:
+            description_parts.append(original_notes)
+        if partner:
+            contact_lines = [f"Contacto GHL: {partner.name}"]
+            if partner.email:
+                contact_lines.append(f"Correo: {partner.email}")
+            if partner.phone:
+                contact_lines.append(f"Teléfono: {partner.phone}")
+            description_parts.append("\n".join(contact_lines))
+        if description_parts:
+            vals["description"] = "\n\n".join(description_parts)
+
+        if existing_event is None:
+            vals["ghl_sede_shift"] = shift
+            vals["user_id"] = vendor.id if vendor else False
+            attendee_partner_ids = set()
+            if vendor and vendor.partner_id:
+                attendee_partner_ids.add(vendor.partner_id.id)
+            if partner:
+                attendee_partner_ids.add(partner.id)
+            if attendee_partner_ids:
+                vals["partner_ids"] = [(6, 0, list(attendee_partner_ids))]
+
+        return vals

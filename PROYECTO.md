@@ -166,9 +166,28 @@ preguntarlos:
   last_assigned_morning_id, last_assigned_afternoon_id) +
   `ghl.sede.vendor` (sede_id, user_id, shift, active, sequence) — N
   vendedores por sede, no fijo en 2. `ghl.sede` es independiente de
-  `ghl.calendar.config`: tiene sus propias credenciales GHL y, en Fase 2,
-  tendrá su propio ciclo de sync — no modifica el pull/push existente
-  que usa FitZone GT.
+  `ghl.calendar.config`: tiene sus propias credenciales GHL y su propio
+  ciclo de sync — no modifica el pull/push existente que usa FitZone GT.
+- Algoritmo de reparto implementado (Fase 2, en `feature/sede-routing`):
+  `ghl.sede._assign_vendor_and_shift()` calcula el turno por hora de corte
+  (zona horaria fija America/Guatemala), arma candidatos activos de ese
+  turno (o del otro turno si no hay, cobertura cruzada), hace round robin
+  1-a-1 con puntero propio por turno, y cae a `fallback_user_id` si no hay
+  ningún candidato. Se integra en `calendar_event.py` vía
+  `_ghl_sede_run_sync_for_sede` / `_ghl_sede_pull_from_ghl` (cron propio,
+  `ir_cron_ghl_sede_sync`, cada 5 min) — SOLO pull GHL->Odoo por ahora, sin
+  push Odoo->GHL para citas de sede (las citas siempre se originan en GHL).
+  El vendedor se asigna una sola vez al crear la cita en Odoo; si en una
+  sync posterior la hora de la cita cae en un turno distinto al guardado
+  (`ghl_sede_shift` en calendar.event), SÍ se reasigna vendedor corriendo
+  de nuevo el round robin del turno nuevo.
+- Limitación conocida (a revisar en Fase 3): si alguien borra directamente
+  en Odoo una cita ruteada por sede, el `unlink()` existente intenta
+  buscar una `ghl.calendar.config` por `ghl_calendar_id` para propagar el
+  borrado a GHL y no la encuentra (las sedes no tienen config), así que
+  el borrado NO se propaga a GHL — solo queda un log de advertencia.
+  Consistente con que Fase 2 es pull-only, pero vale la pena confirmarlo
+  con el cliente.
 - Debe convivir sin romper el modo actual de `ghl.calendar.config`
   (usuario fijo); probablemente como modelo paralelo en vez de
   modificar el existente, para minimizar riesgo sobre producción.

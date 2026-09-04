@@ -119,3 +119,79 @@ class GHLSede(models.Model):
         except GHLApiError as exc:
             raise UserError(f"Falló la conexión con GHL: {exc}") from exc
         raise UserError("Conexión exitosa con GHL.")  # usado como mensaje informativo
+
+    def action_sync_now(self):
+        self.ensure_one()
+        self.env["calendar.event"]._ghl_sede_run_sync_for_sede(self)
+        return True
+
+    @api.model
+    def _cron_sync_all(self):
+        sedes = self.search([("active", "=", True)])
+        for sede in sedes:
+            try:
+                self.env["calendar.event"]._ghl_sede_run_sync_for_sede(sede)
+            except Exception:
+                _logger.exception("Error sincronizando sede GHL id=%s", sede.id)
+                sede.sudo().write({"last_sync_status": "error"})
+                # Continúa con las demás sedes aunque una falle.
+                continue
+
+    # ------------------------------------------------------------------
+    # Algoritmo de reparto (Fase 2)
+    # ------------------------------------------------------------------
+    def _sede_candidates(self, shift):
+        """
+        Vendedores activos de esta sede que participan del turno indicado
+        ('morning' o 'afternoon'), incluyendo a los de turno 'both'.
+        Ordenados por sequence (y luego id) para un orden estable de
+        round robin.
+        """
+        self.ensure_one()
+        return self.vendor_ids.filtered(
+            lambda v: v.active and v.shift in (shift, "both")
+        ).sorted(key=lambda v: (v.sequence, v.id))
+
+    def _assign_vendor_and_shift(self, start_dt_local):
+        """
+        Decide qué vendedor de esta sede debe quedar asignado a una cita
+        cuyo inicio, en hora local de la sede (America/Guatemala), es
+        start_dt_local (un datetime con tzinfo).
+
+        Reglas: turno por hora de corte -> candidatos activos de ese turno
+        -> si no hay, cobertura cruzada con el otro turno -> si tampoco hay,
+        fallback_user_id. Entre candidatos, round robin estricto 1-a-1 con
+        un puntero separado por turno (mañana y tarde reparten igual).
+
+        Devuelve (vendedor res.users o fallback_user_id o registro vacío,
+        turno calculado a partir de la hora de la cita -- este último NO
+        cambia aunque se haya usado cobertura cruzada, ya que es solo la
+        hora la que define el turno "real" de la cita).
+        """
+        self.ensure_one()
+        hour_decimal = start_dt_local.hour + start_dt_local.minute / 60.0
+        primary_shift = "morning" if hour_decimal < self.morning_cutoff_time else "afternoon"
+        other_shift = "afternoon" if primary_shift == "morning" else "morning"
+
+        candidates = self._sede_candidates(primary_shift)
+        rotation_shift = primary_shift
+        if not candidates:
+            candidates = self._sede_candidates(other_shift)
+            rotation_shift = other_shift
+
+        if not candidates:
+            return self.fallback_user_id, primary_shift
+
+        pointer_field = (
+            "last_assigned_morning_id" if rotation_shift == "morning"
+            else "last_assigned_afternoon_id"
+        )
+        ordered_user_ids = [vendor.user_id.id for vendor in candidates]
+        last_assigned = self[pointer_field]
+        if last_assigned and last_assigned.id in ordered_user_ids:
+            next_index = (ordered_user_ids.index(last_assigned.id) + 1) % len(ordered_user_ids)
+        else:
+            next_index = 0
+        assigned_user = self.env["res.users"].browse(ordered_user_ids[next_index])
+        self.sudo().write({pointer_field: assigned_user.id})
+        return assigned_user, primary_shift
