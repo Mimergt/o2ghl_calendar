@@ -2,6 +2,8 @@
 import logging
 from datetime import timedelta
 
+import psycopg2
+
 from odoo import api, fields, models
 from odoo.exceptions import UserError
 
@@ -90,6 +92,16 @@ class GHLSede(models.Model):
         default="never",
         readonly=True,
     )
+    sync_in_progress = fields.Boolean(
+        string="Sincronización en curso", readonly=True, copy=False,
+        help="Se marca automáticamente mientras esta sede está sincronizando "
+        "(manual o por cron) y se limpia al terminar. Mientras esté marcado, "
+        "no se puede lanzar otra sincronización para esta misma sede, para "
+        "evitar dos corridas simultáneas peleando por el mismo calendario.",
+    )
+    sync_started_at = fields.Datetime(
+        string="Sincronización iniciada", readonly=True, copy=False,
+    )
 
     _sql_constraints = [
         (
@@ -122,15 +134,65 @@ class GHLSede(models.Model):
 
     def action_sync_now(self):
         self.ensure_one()
-        self.env["calendar.event"]._ghl_sede_run_sync_for_sede(self)
+        self._sync_with_lock(raise_if_locked=True)
         return True
+
+    def action_force_unlock(self):
+        """
+        Libera manualmente el bloqueo de sincronización de esta sede.
+        Uso normal: nunca hace falta (el bloqueo se libera solo al
+        terminar la corrida, con éxito o con error). Existe solo para
+        el caso raro de que Odoo se haya reiniciado/caído a mitad de una
+        sincronización y el bloqueo haya quedado "pegado" en True sin
+        que nadie lo esté usando realmente.
+        """
+        self.ensure_one()
+        self.sudo().write({"sync_in_progress": False, "sync_started_at": False})
+        return True
+
+    def _sync_with_lock(self, raise_if_locked=False):
+        """
+        Toma un lock de fila a nivel de base de datos (SELECT ... FOR
+        UPDATE NOWAIT) antes de sincronizar esta sede, para que dos
+        corridas simultáneas (cron + botón manual, o doble clic) no
+        procesen el mismo calendario GHL al mismo tiempo. El lock dura
+        hasta que termine la transacción (se libera solo al hacer commit
+        al final del cron/de la acción).
+        """
+        self.ensure_one()
+        try:
+            with self.env.cr.savepoint():
+                self.env.cr.execute(
+                    "SELECT id FROM ghl_sede WHERE id = %s FOR UPDATE NOWAIT",
+                    (self.id,),
+                )
+        except psycopg2.errors.LockNotAvailable:
+            # El savepoint ya deshizo (solo) el SELECT fallido; el resto de
+            # la transacción (p.ej. otras sedes ya sincronizadas en esta
+            # misma corrida del cron) queda intacto.
+            message = (
+                f"La sede '{self.name}' ya tiene una sincronización en curso "
+                "(cron u otro usuario). Espera a que termine antes de lanzar otra."
+            )
+            if raise_if_locked:
+                raise UserError(message)
+            _logger.info(message)
+            return
+
+        self.sudo().write(
+            {"sync_in_progress": True, "sync_started_at": fields.Datetime.now()}
+        )
+        try:
+            self.env["calendar.event"]._ghl_sede_run_sync_for_sede(self)
+        finally:
+            self.sudo().write({"sync_in_progress": False, "sync_started_at": False})
 
     @api.model
     def _cron_sync_all(self):
         sedes = self.search([("active", "=", True)])
         for sede in sedes:
             try:
-                self.env["calendar.event"]._ghl_sede_run_sync_for_sede(sede)
+                sede._sync_with_lock(raise_if_locked=False)
             except Exception:
                 _logger.exception("Error sincronizando sede GHL id=%s", sede.id)
                 sede.sudo().write({"last_sync_status": "error"})
