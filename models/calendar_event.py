@@ -54,8 +54,7 @@ class CalendarEvent(models.Model):
     ghl_sede_id = fields.Many2one(
         "ghl.sede", string="Sede GHL", copy=False, index=True,
         help="Sede (reparto de citas entre vendedores) a la que pertenece "
-        "esta cita, si fue creada/ruteada por ese mecanismo en vez de por "
-        "una ghl.calendar.config de usuario fijo.",
+        "esta cita.",
     )
     ghl_sede_shift = fields.Selection(
         [("morning", "Mañana"), ("afternoon", "Tarde")],
@@ -67,7 +66,7 @@ class CalendarEvent(models.Model):
     )
 
     # ------------------------------------------------------------------
-    # Interceptar borrado en Odoo -> marcar para borrar en GHL
+    # Interceptar borrado en Odoo -> propagar borrado en GHL (vía la sede)
     # ------------------------------------------------------------------
     def unlink(self):
         # Si el borrado viene DESDE la sync de GHL, no hay nada que propagar.
@@ -88,28 +87,20 @@ class CalendarEvent(models.Model):
         # Se propaga DESPUÉS de que el unlink de Odoo tuvo éxito, para no
         # dejar la cita borrada en GHL pero viva en Odoo por un error a mitad.
         if pending_ghl_deletes:
-            config_model = self.env["ghl.calendar.config"].sudo()
-            configs_by_ghl_calendar = {}
+            Sede = self.env["ghl.sede"].sudo()
+            events_by_ghl_calendar = {}
             for ghl_calendar_id, ghl_event_id in pending_ghl_deletes:
-                configs_by_ghl_calendar.setdefault(ghl_calendar_id, []).append(ghl_event_id)
+                events_by_ghl_calendar.setdefault(ghl_calendar_id, []).append(ghl_event_id)
 
-            for ghl_calendar_id, ghl_event_ids in configs_by_ghl_calendar.items():
-                config = config_model.search(
-                    [("ghl_calendar_id", "=", ghl_calendar_id)], limit=1
-                )
-                if not config:
+            for ghl_calendar_id, ghl_event_ids in events_by_ghl_calendar.items():
+                sede = Sede.search([("ghl_calendar_id", "=", ghl_calendar_id)], limit=1)
+                if not sede:
                     _logger.warning(
-                        "No hay config GHL para calendar_id=%s; no se pudo "
+                        "No hay sede GHL para calendar_id=%s; no se pudo "
                         "propagar el borrado de %s", ghl_calendar_id, ghl_event_ids
                     )
                     continue
-                if config.sync_mode not in ("bidirectional", "odoo_to_ghl"):
-                    _logger.info(
-                        "Config %s en modo '%s': no se propaga el borrado de %s a GHL.",
-                        config.id, config.sync_mode, ghl_event_ids,
-                    )
-                    continue
-                client = config._get_client()
+                client = sede._get_client()
                 for ghl_event_id in ghl_event_ids:
                     try:
                         client.delete_event(ghl_event_id)
@@ -121,178 +112,8 @@ class CalendarEvent(models.Model):
                         )
         return result
 
-    # ------------------------------------------------------------------
-    # Punto de entrada del cron
-    # ------------------------------------------------------------------
-    @api.model
-    def _ghl_run_sync_for_config(self, config):
-        """
-        Ejecuta un ciclo completo de sincronización para una config dada,
-        respetando su sync_mode:
-          - bidirectional: pull GHL->Odoo (GHL gana) y push Odoo->GHL
-          - ghl_to_odoo:   solo pull GHL->Odoo (cambios en Odoo se ignoran)
-          - odoo_to_ghl:   solo push Odoo->GHL (cambios en GHL se ignoran)
-        """
-        client = config._get_client()
-        now = fields.Datetime.now()
-        window_start = now - timedelta(days=config.sync_window_days_past)
-        window_end = now + timedelta(days=config.sync_window_days_future)
-
-        log_lines = [f"Modo de sincronización: {config.sync_mode}"]
-        touched_event_ids_from_ghl = set()
-
-        try:
-            if config.sync_mode in ("bidirectional", "ghl_to_odoo"):
-                touched_event_ids_from_ghl = self._ghl_pull_from_ghl(
-                    config, client, window_start, window_end, log_lines
-                )
-            if config.sync_mode in ("bidirectional", "odoo_to_ghl"):
-                self._ghl_push_to_ghl(
-                    config, client, window_start, window_end,
-                    touched_event_ids_from_ghl, log_lines
-                )
-            config.sudo().write(
-                {
-                    "last_sync_datetime": now,
-                    "last_sync_status": "ok",
-                    "last_sync_log": "\n".join(log_lines) or "Sin cambios.",
-                }
-            )
-        except GHLApiError as exc:
-            log_lines.append(f"ERROR: {exc}")
-            config.sudo().write(
-                {
-                    "last_sync_status": "error",
-                    "last_sync_log": "\n".join(log_lines),
-                }
-            )
-            raise
-
-    # ------------------------------------------------------------------
-    # Paso 1: GHL -> Odoo
-    # ------------------------------------------------------------------
-    @api.model
-    def _ghl_pull_from_ghl(self, config, client, window_start, window_end, log_lines):
-        start_ms = int(window_start.timestamp() * 1000)
-        end_ms = int(window_end.timestamp() * 1000)
-
-        try:
-            ghl_events = client.list_events(config.ghl_calendar_id, start_ms, end_ms)
-        except GHLApiError as exc:
-            log_lines.append(f"No se pudo listar eventos de GHL: {exc}")
-            raise
-
-        ghl_event_ids_seen = set()
-        touched_odoo_ids = set()
-
-        for ghl_event in ghl_events:
-            ghl_id = ghl_event.get("id") or ghl_event.get("_id")
-            if not ghl_id:
-                continue
-            ghl_event_ids_seen.add(ghl_id)
-
-            status = (ghl_event.get("appointmentStatus") or "").lower()
-            odoo_event = self.sudo().search([("ghl_event_id", "=", ghl_id)], limit=1)
-
-            if status in ("cancelled", "canceled", "invalid"):
-                if odoo_event:
-                    odoo_event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).unlink()
-                    log_lines.append(f"Borrada en Odoo (cancelada en GHL): {ghl_id}")
-                continue
-
-            vals = self._ghl_map_ghl_event_to_odoo_vals(config, client, ghl_event)
-
-            if not odoo_event:
-                new_event = self.sudo().with_context(**{GHL_SYNC_CONTEXT_KEY: True}).create(vals)
-                touched_odoo_ids.add(new_event.id)
-                log_lines.append(f"Creada en Odoo desde GHL: {ghl_id} -> odoo id {new_event.id}")
-            else:
-                # GHL gana el conflicto: siempre sobreescribimos con la versión de GHL
-                # si hubo cambios en GHL desde el último sync exitoso.
-                ghl_updated_at = ghl_event.get("dateUpdated") or ghl_event.get("updatedAt")
-                if config.last_sync_datetime and ghl_updated_at:
-                    ghl_updated_dt = fields.Datetime.from_string(
-                        ghl_updated_at[:19].replace("T", " ")
-                    )
-                    if ghl_updated_dt <= config.last_sync_datetime and odoo_event.ghl_last_sync:
-                        # No cambió en GHL desde el último sync; no forzamos nada.
-                        continue
-                odoo_event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).write(vals)
-                touched_odoo_ids.add(odoo_event.id)
-                log_lines.append(f"Actualizada en Odoo desde GHL (GHL gana): {ghl_id}")
-
-        # Eventos que en Odoo tienen ghl_event_id de ESTE calendario pero ya
-        # no aparecieron en la ventana de GHL -> fueron borrados en GHL.
-        orphan_domain = [
-            ("ghl_calendar_id", "=", config.ghl_calendar_id),
-            ("ghl_event_id", "!=", False),
-            ("ghl_event_id", "not in", list(ghl_event_ids_seen)),
-            ("start", ">=", window_start),
-            ("start", "<=", window_end),
-        ]
-        orphans = self.sudo().search(orphan_domain)
-        if orphans:
-            log_lines.append(
-                f"Borrando en Odoo {len(orphans)} evento(s) ya no presentes en GHL: "
-                f"{orphans.mapped('ghl_event_id')}"
-            )
-            orphans.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).unlink()
-
-        return touched_odoo_ids
-
     # Prefijo para identificar en Odoo que una cita viene originalmente de GHL.
     GHL_TITLE_PREFIX = "CRM-"
-
-    @api.model
-    def _ghl_map_ghl_event_to_odoo_vals(self, config, client, ghl_event):
-        contact_id = ghl_event.get("contactId")
-        partner = self._ghl_find_or_create_partner_from_contact_id(
-            config, client, contact_id
-        )
-        start_dt = self._ghl_parse_datetime(ghl_event.get("startTime"))
-        end_dt = self._ghl_parse_datetime(ghl_event.get("endTime"))
-        ghl_status = (ghl_event.get("appointmentStatus") or "confirmed").lower()
-        if ghl_status not in ("confirmed", "cancelled", "showed", "noshow", "invalid"):
-            ghl_status = "confirmed"
-
-        title = ghl_event.get("title") or "Cita GHL"
-        if not title.startswith(self.GHL_TITLE_PREFIX):
-            title = f"{self.GHL_TITLE_PREFIX}{title}"
-
-        vals = {
-            "name": title,
-            "start": start_dt,
-            "stop": end_dt,
-            "user_id": config.odoo_user_id.id,
-            "ghl_event_id": ghl_event.get("id") or ghl_event.get("_id"),
-            "ghl_calendar_id": config.ghl_calendar_id,
-            "ghl_last_sync": fields.Datetime.now(),
-            "ghl_appointment_status": ghl_status,
-        }
-
-        attendee_partner_ids = set()
-        if config.odoo_user_id.partner_id:
-            attendee_partner_ids.add(config.odoo_user_id.partner_id.id)
-        if partner:
-            attendee_partner_ids.add(partner.id)
-        if attendee_partner_ids:
-            vals["partner_ids"] = [(6, 0, list(attendee_partner_ids))]
-
-        description_parts = []
-        original_notes = ghl_event.get("notes")
-        if original_notes:
-            description_parts.append(original_notes)
-        if partner:
-            contact_lines = [f"Contacto GHL: {partner.name}"]
-            if partner.email:
-                contact_lines.append(f"Correo: {partner.email}")
-            if partner.phone:
-                contact_lines.append(f"Teléfono: {partner.phone}")
-            description_parts.append("\n".join(contact_lines))
-        if description_parts:
-            vals["description"] = "\n\n".join(description_parts)
-
-        return vals
 
     @staticmethod
     def _ghl_parse_datetime(iso_string):
@@ -348,123 +169,9 @@ class CalendarEvent(models.Model):
         return partner
 
     # ------------------------------------------------------------------
-    # Paso 2: Odoo -> GHL
-    # ------------------------------------------------------------------
-    @api.model
-    def _ghl_push_to_ghl(self, config, client, window_start, window_end,
-                          skip_odoo_ids, log_lines):
-        domain = [
-            ("user_id", "=", config.odoo_user_id.id),
-            ("start", ">=", window_start),
-            ("start", "<=", window_end),
-        ]
-        if config.last_sync_datetime:
-            domain.append(("write_date", ">=", config.last_sync_datetime))
-
-        events = self.sudo().search(domain)
-        events = events.filtered(lambda e: e.id not in skip_odoo_ids)
-
-        for event in events:
-            try:
-                if not event.ghl_event_id:
-                    self._ghl_create_event_in_ghl(config, client, event, log_lines)
-                else:
-                    self._ghl_update_event_in_ghl(config, client, event, log_lines)
-            except GHLApiError as exc:
-                log_lines.append(f"ERROR empujando evento Odoo id={event.id} a GHL: {exc}")
-                _logger.exception("Error empujando evento a GHL")
-
-    def _ghl_create_event_in_ghl(self, config, client, event, log_lines):
-        contact_id = self._ghl_get_or_create_contact_id(config, client, event)
-        if not contact_id:
-            log_lines.append(
-                f"Saltado evento Odoo id={event.id}: no se pudo resolver contacto GHL "
-                f"(agregue un contacto/partner con email o teléfono)."
-            )
-            return
-
-        ghl_event = client.create_event(
-            calendar_id=config.ghl_calendar_id,
-            contact_id=contact_id,
-            title=event.name or "Cita",
-            start_iso=fields.Datetime.to_string(event.start).replace(" ", "T") + "+00:00",
-            end_iso=fields.Datetime.to_string(event.stop).replace(" ", "T") + "+00:00",
-            notes=event.description or None,
-            appointment_status=event.ghl_appointment_status or "confirmed",
-        )
-        ghl_id = ghl_event.get("id") or ghl_event.get("_id")
-        event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).write(
-            {
-                "ghl_event_id": ghl_id,
-                "ghl_calendar_id": config.ghl_calendar_id,
-                "ghl_last_sync": fields.Datetime.now(),
-            }
-        )
-        log_lines.append(f"Creada en GHL desde Odoo: odoo id {event.id} -> {ghl_id}")
-
-    def _ghl_update_event_in_ghl(self, config, client, event, log_lines):
-        if event.ghl_appointment_status == "cancelled":
-            # Cancelar en Odoo = borrar la cita en GHL (y en Odoo, vía unlink normal).
-            try:
-                client.delete_event(event.ghl_event_id)
-                log_lines.append(
-                    f"Cita cancelada en Odoo -> borrada en GHL: {event.ghl_event_id}"
-                )
-            except GHLApiError:
-                _logger.exception(
-                    "No se pudo borrar en GHL la cita cancelada %s", event.ghl_event_id
-                )
-                raise
-            event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).unlink()
-            return
-
-        client.update_event(
-            event.ghl_event_id,
-            title=event.name or "Cita",
-            startTime=fields.Datetime.to_string(event.start).replace(" ", "T") + "+00:00",
-            endTime=fields.Datetime.to_string(event.stop).replace(" ", "T") + "+00:00",
-            notes=event.description or None,
-            appointmentStatus=event.ghl_appointment_status or "confirmed",
-        )
-        event.with_context(**{GHL_SYNC_CONTEXT_KEY: True}).write(
-            {"ghl_last_sync": fields.Datetime.now()}
-        )
-        log_lines.append(f"Actualizada en GHL desde Odoo: odoo id {event.id} -> {event.ghl_event_id}")
-
-    def _ghl_get_or_create_contact_id(self, config, client, event):
-        partner = event.partner_ids.filtered(lambda p: p.ghl_contact_id)[:1]
-        if partner:
-            return partner.ghl_contact_id
-
-        candidate = event.partner_ids[:1]
-        if not candidate:
-            return False
-
-        email = candidate.email
-        phone = candidate.phone or candidate.mobile
-        try:
-            found = client.find_contact_by_email_or_phone(email=email, phone=phone)
-            if found:
-                contact_id = found.get("id") or found.get("_id")
-            else:
-                created = client.create_contact(name=candidate.name, email=email, phone=phone)
-                contact_id = created.get("id") or created.get("_id")
-        except GHLApiError:
-            _logger.exception("Error resolviendo/creando contacto GHL para partner %s", candidate.id)
-            return False
-
-        if contact_id:
-            candidate.sudo().write({"ghl_contact_id": contact_id})
-        return contact_id
-
-
-    # ------------------------------------------------------------------
-    # Reparto por sede (Fase 2) — independiente del pull/push basado en
-    # ghl.calendar.config: usa las credenciales y el calendario propios de
-    # cada ghl.sede, y su propio ciclo de sync (ver ghl.sede._cron_sync_all).
-    # Por ahora es solo GHL -> Odoo (pull): las citas siempre se originan
-    # en GHL vía el agente de IA que decide la sede; no hay push Odoo->GHL
-    # para citas de sede todavía.
+    # Reparto por sede — sincronización GHL -> Odoo (pull). Las citas
+    # siempre se originan en GHL vía el agente de IA que decide la sede;
+    # no hay push Odoo->GHL para citas de sede todavía.
     # ------------------------------------------------------------------
     GHL_SEDE_TZ = "America/Guatemala"
 

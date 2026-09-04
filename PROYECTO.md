@@ -181,13 +181,28 @@ preguntarlos:
   sync posterior la hora de la cita cae en un turno distinto al guardado
   (`ghl_sede_shift` en calendar.event), SÍ se reasigna vendedor corriendo
   de nuevo el round robin del turno nuevo.
-- Limitación conocida (a revisar en Fase 3): si alguien borra directamente
-  en Odoo una cita ruteada por sede, el `unlink()` existente intenta
-  buscar una `ghl.calendar.config` por `ghl_calendar_id` para propagar el
-  borrado a GHL y no la encuentra (las sedes no tienen config), así que
-  el borrado NO se propaga a GHL — solo queda un log de advertencia.
-  Consistente con que Fase 2 es pull-only, pero vale la pena confirmarlo
-  con el cliente.
+- **Limitación resuelta**: se eliminó por completo `ghl.calendar.config`
+  (el cliente no lo necesita; ver más abajo "Retiro del modo config") y
+  `unlink()` ahora busca la `ghl.sede` por `ghl_calendar_id` para propagar
+  el borrado a GHL. Validado en vivo contra la API real de GHL: al borrar
+  en Odoo una cita ruteada por sede, `client.delete_event()` sí se
+  ejecuta y el evento desaparece de `list_events` (aunque el endpoint
+  `get_event` individual de GHL puede devolver datos obsoletos/cacheados
+  para un evento recién borrado por un rato — no confiar en ese endpoint
+  para verificar borrados, usar `list_events`).
+
+### Retiro del modo `ghl.calendar.config` (post Fase 3)
+El cliente de sedes múltiples no usa ni necesita el modo original "1
+config = 1 calendario = 1 usuario fijo" (ese modelo seguía existiendo
+solo por herencia del diseño original para FitZone GT). Se eliminó
+completamente de `feature/sede-routing`: modelo, vistas, cron, accesos,
+y todo el código de push/pull bidireccional en `calendar_event.py` que
+dependía de él (`_ghl_run_sync_for_config`, `_ghl_pull_from_ghl`,
+`_ghl_push_to_ghl`, etc.). Esta rama es exclusiva de este cliente y no
+se mergea a `main` (que sigue sirviendo a FitZone GT con el modelo
+original intacto), así que el retiro no afecta producción. De paso, el
+módulo se renombró de "GoHighLevel Calendar Sync" a "GHL2ODOO" con
+ícono/branding propio (Mimer — EPIC.GT) en el manifest y el menú raíz.
 - **Cambio de diseño (post Fase 3, validación en vivo con el cliente)**:
   `ghl.sede.vendor.shift` (Selection mañana/tarde/ambos) se reemplazó por
   dos booleanos `works_morning` / `works_afternoon`. El campo `shift`

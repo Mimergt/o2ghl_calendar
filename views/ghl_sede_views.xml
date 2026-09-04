@@ -96,6 +96,11 @@
         <field name="view_mode">list,form</field>
     </record>
 
+    <menuitem id="menu_ghl_calendar_sync_root"
+              name="GHL2ODOO"
+              sequence="90"
+              groups="base.group_system"
+              web_icon="ghl_calendar_sync,static/description/icon.png"/>
     <menuitem id="menu_ghl_sede"
               name="Sedes"
               parent="menu_ghl_calendar_sync_root"
