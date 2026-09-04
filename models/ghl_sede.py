@@ -143,13 +143,16 @@ class GHLSede(models.Model):
     def _sede_candidates(self, shift):
         """
         Vendedores activos de esta sede que participan del turno indicado
-        ('morning' o 'afternoon'), incluyendo a los de turno 'both'.
+        ('morning' o 'afternoon'), es decir, con works_morning/works_afternoon
+        marcado según corresponda. Un vendedor puede marcar ambas casillas y
+        así entrar en el round robin de los dos turnos.
         Ordenados por sequence (y luego id) para un orden estable de
         round robin.
         """
         self.ensure_one()
+        shift_field = "works_morning" if shift == "morning" else "works_afternoon"
         return self.vendor_ids.filtered(
-            lambda v: v.active and v.shift in (shift, "both")
+            lambda v: v.active and v[shift_field]
         ).sorted(key=lambda v: (v.sequence, v.id))
 
     def _assign_vendor_and_shift(self, start_dt_local):

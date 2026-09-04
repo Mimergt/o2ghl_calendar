@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-from odoo import fields, models
+from odoo import api, fields, models
+from odoo.exceptions import ValidationError
 
 
 class GHLSedeVendor(models.Model):
     _name = "ghl.sede.vendor"
-    _description = "Vendedor asignable a una sede GHL, con su turno"
+    _description = "Vendedor asignable a una sede GHL, con sus turnos"
     _order = "sede_id, sequence, id"
 
     sede_id = fields.Many2one(
@@ -19,18 +20,15 @@ class GHLSedeVendor(models.Model):
         string="Vendedor (usuario Odoo)",
         required=True,
     )
-    shift = fields.Selection(
-        [
-            ("morning", "Mañana"),
-            ("afternoon", "Tarde"),
-            ("both", "Ambos"),
-        ],
-        string="Turno",
-        required=True,
-        default="both",
-        help="Turno(s) en los que este vendedor participa del reparto. "
-        "'Ambos' significa que entra en el round robin de mañana y también "
-        "en el de tarde.",
+    works_morning = fields.Boolean(
+        string="Mañana",
+        default=True,
+        help="Este vendedor participa del round robin del turno mañana.",
+    )
+    works_afternoon = fields.Boolean(
+        string="Tarde",
+        default=True,
+        help="Este vendedor participa del round robin del turno tarde.",
     )
     active = fields.Boolean(
         default=True,
@@ -56,3 +54,12 @@ class GHLSedeVendor(models.Model):
             "Este vendedor ya está asignado a esta sede.",
         ),
     ]
+
+    @api.constrains("works_morning", "works_afternoon")
+    def _check_at_least_one_shift(self):
+        for vendor in self:
+            if not vendor.works_morning and not vendor.works_afternoon:
+                raise ValidationError(
+                    "%s debe participar en al menos un turno (Mañana o Tarde)."
+                    % vendor.user_id.name
+                )

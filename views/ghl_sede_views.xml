@@ -48,11 +48,17 @@
                     </group>
                     <notebook>
                         <page string="Vendedores">
+                            <p class="text-muted">
+                                Marca los turnos en los que cada vendedor participa del
+                                reparto (round robin). Un vendedor puede estar marcado en
+                                ambas columnas si trabaja mañana y tarde.
+                            </p>
                             <field name="vendor_ids">
                                 <list editable="bottom">
                                     <field name="sequence" widget="handle"/>
                                     <field name="user_id"/>
-                                    <field name="shift"/>
+                                    <field name="works_morning" string="Mañana"/>
+                                    <field name="works_afternoon" string="Tarde"/>
                                     <field name="active"/>
                                 </list>
                             </field>

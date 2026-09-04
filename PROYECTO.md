@@ -188,6 +188,17 @@ preguntarlos:
   el borrado NO se propaga a GHL — solo queda un log de advertencia.
   Consistente con que Fase 2 es pull-only, pero vale la pena confirmarlo
   con el cliente.
+- **Cambio de diseño (post Fase 3, validación en vivo con el cliente)**:
+  `ghl.sede.vendor.shift` (Selection mañana/tarde/ambos) se reemplazó por
+  dos booleanos `works_morning` / `works_afternoon`. El campo `shift`
+  único resultaba confuso al configurar el caso real más común (un
+  vendedor que cubre mañana Y tarde, otro que cubre solo tarde) — con
+  checkboxes independientes se marca directamente lo que aplica a cada
+  vendedor, sin tener que pensar en la palabra "Ambos" como un tercer
+  valor aparte. `_sede_candidates()` en `ghl.sede` ahora filtra por el
+  booleano correspondiente al turno en vez de `shift in (turno, 'both')`.
+  Migración (`migrations/18.0.1.3.0/pre-migrate.py`) convierte datos
+  existentes antes de que el ORM borre la columna vieja.
 - Debe convivir sin romper el modo actual de `ghl.calendar.config`
   (usuario fijo); probablemente como modelo paralelo en vez de
   modificar el existente, para minimizar riesgo sobre producción.
