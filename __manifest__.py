@@ -28,6 +28,7 @@ Características:
         "security/ir.model.access.csv",
         "data/ir_cron_data.xml",
         "views/ghl_calendar_config_views.xml",
+        "views/ghl_sede_views.xml",
         "views/calendar_event_views.xml",
         "views/res_partner_views.xml",
     ],

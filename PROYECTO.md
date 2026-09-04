@@ -130,7 +130,7 @@ servidor).
   funcionando y respetados tanto en el pull como en el push y en el
   unlink.
 
-## Trabajo en progreso / próxima fase (no implementado aún)
+## Trabajo en progreso / próxima fase
 
 Un cliente con múltiples marcas/sedes pidió una extensión: reparto
 automático de citas entrantes entre varios vendedores por sede, según
@@ -147,8 +147,12 @@ preguntarlos:
 - Cada sede tiene su propio calendario GHL (un agente de IA dentro de
   GHL decide en qué calendario cae cada cita, fuera del alcance de este
   módulo).
-- Turno mañana → un único vendedor de turno. Turno tarde → round robin
-  estricto 1-a-1 (no por carga) entre los vendedores de turno tarde.
+- Turno mañana y turno tarde → round robin estricto 1-a-1 (no por carga)
+  entre los vendedores activos de ese turno (decisión confirmada: si algún
+  día una sede tiene 2+ vendedores en turno mañana, también se reparten
+  por round robin, con su propio puntero, igual que tarde — no es un
+  vendedor fijo). Por eso `ghl.sede` necesita DOS punteros de round robin
+  (`last_assigned_morning_id` y `last_assigned_afternoon_id`), no uno solo.
 - Hora de corte mañana/tarde configurable POR SEDE (no global, no por
   empresa).
 - Cobertura: si el vendedor de un turno está inactivo, cae al vendedor
@@ -156,10 +160,15 @@ preguntarlos:
   usuario "fallback" fijo por sede.
 - El vendedor asignado debe quedar como organizador (`user_id`) Y como
   invitado (`partner_ids`), junto con el contacto del cliente.
-- Modelo de datos propuesto: `ghl.sede` (name, company_id,
-  ghl_calendar_id, morning_cutoff_time, fallback_user_id, puntero(s) de
-  round robin) + `ghl.sede.vendor` (sede_id, user_id, shift, active,
-  sequence) — N vendedores por sede, no fijo en 2.
+- Modelo de datos implementado (Fase 1, en `feature/sede-routing`):
+  `ghl.sede` (name, company_id, ghl_api_key, ghl_location_id,
+  ghl_calendar_id, morning_cutoff_time, fallback_user_id,
+  last_assigned_morning_id, last_assigned_afternoon_id) +
+  `ghl.sede.vendor` (sede_id, user_id, shift, active, sequence) — N
+  vendedores por sede, no fijo en 2. `ghl.sede` es independiente de
+  `ghl.calendar.config`: tiene sus propias credenciales GHL y, en Fase 2,
+  tendrá su propio ciclo de sync — no modifica el pull/push existente
+  que usa FitZone GT.
 - Debe convivir sin romper el modo actual de `ghl.calendar.config`
   (usuario fijo); probablemente como modelo paralelo en vez de
   modificar el existente, para minimizar riesgo sobre producción.
