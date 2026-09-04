@@ -134,7 +134,14 @@ class GHLSede(models.Model):
 
     def action_sync_now(self):
         self.ensure_one()
-        self._sync_with_lock(raise_if_locked=True)
+        try:
+            self._sync_with_lock(raise_if_locked=True)
+        except GHLApiError as exc:
+            raise UserError(
+                f"No se pudo sincronizar con GHL: {exc}\n\n"
+                "Esto suele ser un problema transitorio del lado de GHL "
+                "(timeout, rate limit). Intenta de nuevo en un momento."
+            ) from exc
         return True
 
     def action_force_unlock(self):
@@ -208,14 +215,20 @@ class GHLSede(models.Model):
         ('morning' o 'afternoon'), es decir, con works_morning/works_afternoon
         marcado según corresponda. Un vendedor puede marcar ambas casillas y
         así entrar en el round robin de los dos turnos.
-        Ordenados por sequence (y luego id) para un orden estable de
-        round robin.
+
+        Los vendedores dedicados SOLO a este turno van primero en el orden
+        (y por lo tanto son los primeros en recibir cita cuando el puntero
+        de round robin todavía está vacío); los que cubren ambos turnos van
+        después, para no saturarlos con las citas que un vendedor dedicado
+        ya podría atender. Dentro de cada grupo, se ordena por sequence
+        (y luego id) para un orden estable de round robin.
         """
         self.ensure_one()
         shift_field = "works_morning" if shift == "morning" else "works_afternoon"
-        return self.vendor_ids.filtered(
-            lambda v: v.active and v[shift_field]
-        ).sorted(key=lambda v: (v.sequence, v.id))
+        candidates = self.vendor_ids.filtered(lambda v: v.active and v[shift_field])
+        return candidates.sorted(
+            key=lambda v: (v.works_morning and v.works_afternoon, v.sequence, v.id)
+        )
 
     def _assign_vendor_and_shift(self, start_dt_local):
         """
